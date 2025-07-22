@@ -1,5 +1,154 @@
 import traci
 import math
+import xml.etree.ElementTree as ET
+import math
+import random
+'''
+Charging station data for SUMO cs.add.xml is created.
+'''
+def parse_lane_shape(shape_input):
+    """
+    Parse a lane shape input which can be either:
+      - A string of the format "x1,y1 x2,y2 ..." or
+      - A tuple/list of coordinates.
+    Returns a list of (x, y) float tuples.
+    """
+    if isinstance(shape_input, str):
+        points = []
+        segments = shape_input.strip().split()
+        for seg in segments:
+            x, y = seg.split(',')
+            points.append((float(x), float(y)))
+        return points
+    elif isinstance(shape_input, (tuple, list)):
+        if len(shape_input) > 0 and isinstance(shape_input[0], (tuple, list)):
+            return list(shape_input)
+        else:
+            # If it's a flat list of coordinates, pair them up.
+            it = iter(shape_input)
+            return list(zip(it, it))
+    else:
+        raise ValueError("Unexpected lane shape input type: " + str(type(shape_input)))
+
+def distance_point_to_segment(px, py, x1, y1, x2, y2):
+    """
+    Compute the Euclidean distance from point (px,py) to the segment (x1,y1)-(x2,y2).
+    Returns:
+      - The distance,
+      - The projection point on the segment,
+      - The parameter t (0<=t<=1) indicating the relative position.
+    """
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0 and dy == 0:
+        return math.hypot(px - x1, py - y1), (x1, y1), 0
+    t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+    t = max(0, min(1, t))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    dist = math.hypot(px - proj_x, py - proj_y)
+    return dist, (proj_x, proj_y), t
+
+def distance_point_to_polyline(px, py, polyline):
+    """
+    Compute the minimal distance from point (px,py) to a polyline (list of (x,y) points)
+    and return that distance along with the cumulative position (in meters) along the polyline.
+    """
+    min_distance = float('inf')
+    best_proj_length = 0
+    total_length = 0
+    for i in range(len(polyline) - 1):
+        x1, y1 = polyline[i]
+        x2, y2 = polyline[i+1]
+        seg_length = math.hypot(x2 - x1, y2 - y1)
+        dist, proj, t = distance_point_to_segment(px, py, x1, y1, x2, y2)
+        if dist < min_distance:
+            min_distance = dist
+            best_proj_length = total_length + t * seg_length
+        total_length += seg_length
+    return min_distance, best_proj_length
+
+def lane_length(polyline):
+    """
+    Compute the total length of a lane represented as a polyline (list of (x,y) points).
+    """
+    total = 0
+    for i in range(len(polyline) - 1):
+        total += math.hypot(polyline[i+1][0] - polyline[i][0],
+                            polyline[i+1][1] - polyline[i][1])
+    return total
+
+def main():
+    # Parse the charging station nodes from the XML file.
+    cs_tree = ET.parse('charging_stations_xy.xml')
+    cs_root = cs_tree.getroot()
+
+    # Get lane shapes from SUMO TraCI.
+    # Exclude internal lanes (IDs starting with ":")
+    lane_shapes = {
+        lane: parse_lane_shape(traci.lane.getShape(lane))
+        for lane in traci.lane.getIDList() if not lane.startswith(":")
+    }
+
+    # Dictionary to store the generated charging stations.
+    charging_stations = {}
+
+    cs_file = "cs.add.xml"
+    with open(cs_file, "w", encoding="utf-8") as f_cs:
+        f_cs.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        f_cs.write('<additional>\n')
+        # Process each charging station node.
+        for i, node in enumerate(cs_root.findall('node')):
+            cs_x = float(node.get('x'))
+            cs_y = float(node.get('y'))
+
+            best_lane = None
+            min_distance = float('inf')
+
+            # Determine the nearest lane for this charging station.
+            for lane_id, shape in lane_shapes.items():
+                dist, _ = distance_point_to_polyline(cs_x, cs_y, shape)
+                if dist < min_distance:
+                    min_distance = dist
+                    best_lane = lane_id
+
+            # Compute the lane length.
+            polyline = lane_shapes[best_lane]
+            length = lane_length(polyline)
+            # Determine startPos and endPos.
+            start_pos = max(0.3 * length, 0)
+            end_pos = min(0.7 * length, length)
+            if end_pos - start_pos < 1:  # Ensure valid charging station length.
+                start_pos = 0
+                end_pos = 0.5 * length
+
+            # Randomly choose a power level.
+            power = random.choice([50000, 100000, 150000])
+            efficiency = 1.0
+            # Create a new charging station ID in the desired format.
+            cs_new_id = f"cs{i}"
+            f_cs.write(f'    <chargingStation id="{cs_new_id}" lane="{best_lane}" startPos="{start_pos:.2f}" endPos="{end_pos:.2f}" power="{power}" efficiency="{efficiency}" chargeInTransit="false"/>\n')
+            charging_stations[cs_new_id] = best_lane
+        f_cs.write('</additional>\n')
+
+    print(f"Charging stations generated successfully: {cs_file}")
+    print(f"Charging stations dictionary: {charging_stations}")
+
+'''
+The Charging policy implemetation and dynamic SUMO Simulation using Traci.
+'''
+
+
+if __name__ == "__main__":
+    # Start SUMO with the given network file.
+    net_file = "city.net.xml"
+    traci.start(["sumo", "--net-file", net_file])
+    try:
+        main()
+    finally:
+        traci.close()
+
+
 
 def get_distance(pos1, pos2):
     return math.hypot(pos1[0] - pos2[0], pos1[1] - pos2[1])
@@ -127,3 +276,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
